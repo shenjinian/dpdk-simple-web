@@ -27,7 +27,7 @@ HTTP应答也最好不超过TCP MSS长度（也许将来可以实现IP包分片�
 我的环境：(Ubuntu 17.10)
 
 ```
-apt-get install libnuma-dev libcap-dev
+apt-get install libnuma-dev libcap-dev git make
 cd /usr/src
 wget https://fast.dpdk.org/rel/dpdk-17.11.tar.xz
 xzcat dpdk-17.11.tar.xz | tar xvf -
