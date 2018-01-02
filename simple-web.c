@@ -31,6 +31,8 @@
  *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+/* simple-web.c: Simple WEB Server using DPDK. */
+
 #include <stdint.h>
 #include <inttypes.h>
 #include <rte_eal.h>
@@ -39,6 +41,9 @@
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
 
+#include <linux/if_packet.h>
+#include <linux/if_ether.h>
+#include <linux/if_arp.h>
 #include <arpa/inet.h>
 
 #define RX_RING_SIZE 128
@@ -55,20 +60,6 @@ static const struct rte_eth_conf port_conf_default = {
 typedef unsigned long int uint32;
 typedef unsigned short int uint16;
 
-uint32 myip;  // My IP Address in network order
-
-uint16 tcp_port; // listen tcp_port in network order
-
-char * INET_NTOA(uint32 ip);
-
-char * INET_NTOA(uint32 ip)  // is is network order
-{
-	static char buf[100];
-	sprintf(buf,"%d.%d.%d.%d",
-		(int)(ip&0xff), (int)((ip>>8)&0xff), (int)((ip>>16)&0xff), (int)((ip>>24)&0xff));
-	return buf;
-}
-
 struct __attribute__((packed)) arp_header
 {
 	unsigned short arp_hd;
@@ -82,7 +73,37 @@ struct __attribute__((packed)) arp_header
 	unsigned char arp_dpa[4];
 };
 
-/* simple-web.c: Simple WEB Server using DPDK. */
+struct ether_addr my_eth_addr;	// My ethernet address
+uint32 my_ip;  			// My IP Address in network order
+uint16 tcp_port; 		// listen tcp port in network order
+
+
+char * INET_NTOA(uint32 ip);
+void swap_bytes(unsigned char *a, unsigned char *b, int len);
+void dump_packet(unsigned char *buf, int len);
+void dump_arp_packet(struct ethhdr *eh);
+void process_arp(struct rte_mbuf *mbuf);
+
+char * INET_NTOA(uint32 ip)	// ip is network order
+{
+	static char buf[100];
+	sprintf(buf,"%d.%d.%d.%d",
+		(int)(ip&0xff), (int)((ip>>8)&0xff), (int)((ip>>16)&0xff), (int)((ip>>24)&0xff));
+	return buf;
+}
+
+void swap_bytes(unsigned char *a, unsigned char *b, int len)
+{
+	unsigned char t;
+	int i;
+	if (len <= 0)
+		return;
+	for (i = 0; i < len; i++) {
+		t = *(a + i);
+		*(a + i) = *(b + i);
+		*(b + i) = t;
+	}
+}
 
 /*
  * Initializes a given port using global settings and with the RX buffers
@@ -141,16 +162,16 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 			addr.addr_bytes[2], addr.addr_bytes[3],
 			addr.addr_bytes[4], addr.addr_bytes[5]);
 
+	my_eth_addr = addr;
 	/* Enable RX in promiscuous mode for the Ethernet device. */
-	rte_eth_promiscuous_enable(port);
+	// rte_eth_promiscuous_enable(port);
 
 	return 0;
 }
 
-void dump_packet(unsigned char *buf, int len);
-
 void dump_packet(unsigned char *buf, int len)
-{	printf("packet buf=%p len=%d\n",buf,len);
+{
+	printf("packet buf=%p len=%d\n",buf,len);
 	int i,j;
 	unsigned char c;
 	for(i=0;i<len;i++) {
@@ -170,9 +191,71 @@ void dump_packet(unsigned char *buf, int len)
 			}
 			printf("\n");
 		}
-
 	}
 }
+
+void dump_arp_packet(struct ethhdr *eh)
+{
+	struct arp_header *ah;
+	ah = (struct arp_header*) ((unsigned char *)eh + 14);
+	printf("+++++++++++++++++++++++++++++++++++++++\n" );
+	printf("ARP PACKET: %p \n",eh);
+	printf("ETHER DST MAC address: %02X:%02X:%02X:%02X:%02X:%02X\n",
+		eh->h_dest[0], eh->h_dest[1], eh->h_dest[2], eh->h_dest[3],
+		eh->h_dest[4], eh->h_dest[5]);
+	printf("ETHER SRC MAC address: %02X:%02X:%02X:%02X:%02X:%02X\n",
+		eh->h_source[0], eh->h_source[1], eh->h_source[2], eh->h_source[3], eh->h_source[4],
+		eh->h_source[5]);
+	printf("H/D TYPE : %x PROTO TYPE : %x \n",ah->arp_hd,ah->arp_pr);
+	printf("H/D leng : %x PROTO leng : %x \n",ah->arp_hdl,ah->arp_prl);
+	printf("OPERATION : %x \n", ah->arp_op);
+	printf("SENDER MAC address: %02X:%02X:%02X:%02X:%02X:%02X\n",
+		ah->arp_sha[0], ah->arp_sha[1], ah->arp_sha[2], ah->arp_sha[3],
+		ah->arp_sha[4], ah->arp_sha[5]);
+	printf("SENDER IP address: %02d:%02d:%02d:%02d\n",
+		ah->arp_spa[0], ah->arp_spa[1], ah->arp_spa[2], ah->arp_spa[3]);
+	printf("TARGET MAC address: %02X:%02X:%02X:%02X:%02X:%02X\n",
+		ah->arp_dha[0], ah->arp_dha[1], ah->arp_dha[2], ah->arp_dha[3],
+		ah->arp_dha[4], ah->arp_dha[5]);
+	printf("TARGET IP address: %02d:%02d:%02d:%02d\n",
+		ah->arp_dpa[0], ah->arp_dpa[1], ah->arp_dpa[2], ah->arp_dpa[3]);
+}
+
+#define DEBUGARP
+
+void process_arp(struct rte_mbuf *mbuf)
+{
+	struct ethhdr *eh = rte_pktmbuf_mtod(mbuf, struct ethhdr*);
+	struct arp_header *ah;
+	ah = (struct arp_header*) ((unsigned char *)eh + 14);
+#ifdef DEBUGARP
+	dump_arp_packet(eh);
+#endif
+	if(htons(ah->arp_op) != 0x0001) { // ARP request
+		rte_pktmbuf_free(mbuf);
+		return;
+	}
+	if(memcmp((unsigned char*)&my_ip, (unsigned char*)ah->arp_dpa, 4)==0) {
+#ifdef DEBUGARP
+		printf("Asking me....\n");
+#endif
+		memcpy((unsigned char*)eh->h_dest, (unsigned char*)eh->h_source, 6);
+		memcpy((unsigned char*)eh->h_source, (unsigned char*)&my_eth_addr, 6);
+		ah->arp_op=htons(0x2);
+		memcpy((unsigned char*)ah->arp_dha, (unsigned char*)ah->arp_sha, 6);
+		memcpy((unsigned char*)ah->arp_dpa, (unsigned char*)ah->arp_spa, 4);
+		memcpy((unsigned char*)ah->arp_sha, (unsigned char*)&my_eth_addr, 6);
+		memcpy((unsigned char*)ah->arp_spa, (unsigned char*)&my_ip, 4);
+#ifdef DEBUGARP
+		printf("I will reply following \n");
+		dump_arp_packet(eh);
+#endif
+		if(likely(1 == rte_eth_tx_burst(0, 0, &mbuf, 1)))
+			return;
+	}
+	rte_pktmbuf_free(mbuf);
+}
+
 /*
  * The lcore main. This is the main thread that does the work, reading from
  * an input port and writing to an output port.
@@ -213,9 +296,9 @@ lcore_main(void)
 			dump_packet(rte_pktmbuf_mtod(bufs[i], unsigned char*), rte_pktmbuf_pkt_len(bufs[i]));
 			struct ethhdr *eh = rte_pktmbuf_mtod(bufs[i], struct ethhdr*);
 			if(htons(eh->h_proto)== 0x806){  // ARP protocol
-				
-			}
-			rte_pktmbuf_free(bufs[i]);
+				process_arp(bufs[i]);
+			} else
+				rte_pktmbuf_free(bufs[i]);
 		}
 
 #if 0
@@ -254,11 +337,11 @@ main(int argc, char *argv[])
 	if(argc!=3)
 		rte_exit(EXIT_FAILURE, "You need tell me my IP and port\n");
 
-	myip = inet_addr(argv[1]);
+	my_ip = inet_addr(argv[1]);
 
 	tcp_port = htons(atoi(argv[2]));
 
-	printf("My IP is: %s, port is %d\n", INET_NTOA(myip), ntohs(tcp_port));
+	printf("My IP is: %s, port is %d\n", INET_NTOA(my_ip), ntohs(tcp_port));
 
 	/* Check that there is an even number of ports to send/receive on. */
 	nb_ports = rte_eth_dev_count();
@@ -276,6 +359,11 @@ main(int argc, char *argv[])
 	if (port_init(0, mbuf_pool) != 0)
 		rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu16 "\n",
 					0);
+	printf("My ether addr is: %02X:%02X:%02X:%02X:%02X:%02X",
+			my_eth_addr.addr_bytes[0], my_eth_addr.addr_bytes[1],
+			my_eth_addr.addr_bytes[2], my_eth_addr.addr_bytes[3],
+			my_eth_addr.addr_bytes[4], my_eth_addr.addr_bytes[5]);
+
 
 	if (rte_lcore_count() > 1)
 		printf("\nWARNING: Too many lcores enabled. Only 1 used.\n");
