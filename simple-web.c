@@ -39,6 +39,8 @@
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
 
+#include <arpa/inet.h>
+
 #define RX_RING_SIZE 128
 #define TX_RING_SIZE 512
 
@@ -48,6 +50,36 @@
 
 static const struct rte_eth_conf port_conf_default = {
 	.rxmode = { .max_rx_pkt_len = ETHER_MAX_LEN }
+};
+
+typedef unsigned long int uint32;
+typedef unsigned short int uint16;
+
+uint32 myip;  // My IP Address in network order
+
+uint16 tcp_port; // listen tcp_port in network order
+
+char * INET_NTOA(uint32 ip);
+
+char * INET_NTOA(uint32 ip)  // is is network order
+{
+	static char buf[100];
+	sprintf(buf,"%d.%d.%d.%d",
+		(int)(ip&0xff), (int)((ip>>8)&0xff), (int)((ip>>16)&0xff), (int)((ip>>24)&0xff));
+	return buf;
+}
+
+struct __attribute__((packed)) arp_header
+{
+	unsigned short arp_hd;
+	unsigned short arp_pr;
+	unsigned char arp_hdl;
+	unsigned char arp_prl;
+	unsigned short arp_op;
+	unsigned char arp_sha[6];
+	unsigned char arp_spa[4];
+	unsigned char arp_dha[6];
+	unsigned char arp_dpa[4];
 };
 
 /* simple-web.c: Simple WEB Server using DPDK. */
@@ -174,12 +206,15 @@ lcore_main(void)
 		struct rte_mbuf *bufs[BURST_SIZE];
 		const uint16_t nb_rx = rte_eth_rx_burst(port, 0,
 			bufs, BURST_SIZE);
-
 		if (unlikely(nb_rx == 0))
 			continue;
 		printf("got %d packets\n",nb_rx);
 		for(i=0;i<nb_rx;i++) {
 			dump_packet(rte_pktmbuf_mtod(bufs[i], unsigned char*), rte_pktmbuf_pkt_len(bufs[i]));
+			struct ethhdr *eh = rte_pktmbuf_mtod(bufs[i], struct ethhdr*);
+			if(htons(eh->h_proto)== 0x806){  // ARP protocol
+				
+			}
 			rte_pktmbuf_free(bufs[i]);
 		}
 
@@ -215,6 +250,15 @@ main(int argc, char *argv[])
 
 	argc -= ret;
 	argv += ret;
+
+	if(argc!=3)
+		rte_exit(EXIT_FAILURE, "You need tell me my IP and port\n");
+
+	myip = inet_addr(argv[1]);
+
+	tcp_port = htons(atoi(argv[2]));
+
+	printf("My IP is: %s, port is %d\n", INET_NTOA(myip), ntohs(tcp_port));
 
 	/* Check that there is an even number of ports to send/receive on. */
 	nb_ports = rte_eth_dev_count();
