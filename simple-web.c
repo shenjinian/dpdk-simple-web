@@ -56,6 +56,8 @@
 #define MBUF_CACHE_SIZE 250
 #define BURST_SIZE 32
 
+#define TCPMSS 1200
+
 static const struct rte_eth_conf port_conf_default = {
 	.rxmode = { .max_rx_pkt_len = ETHER_MAX_LEN }
 };
@@ -187,7 +189,7 @@ void dump_packet(unsigned char *buf, int len)
 			printf(" | ");
 			for(j=(i-(i%16));j<=i;j++) {
 				c=buf[j];
-				if((c>31) &&(c<127)) 
+				if((c>31)&&(c<127))
 					printf("%c",c);
 				else
 					printf(".");
@@ -356,6 +358,33 @@ static void set_tcp_checksum(struct iphdr *ip)
 	ip->check = packet_chksum((unsigned short *) ip, ip->ihl<<2);
 }
 
+#define DEBUGHTTP
+int process_http(unsigned char *http_req, int req_len, unsigned char *http_resp, int *resp_len);
+int process_http(unsigned char *http_req, int req_len, unsigned char *http_resp, int *resp_len)
+{
+#ifdef DEBUGHTTP
+	printf("http req payload is: ");
+	int i;
+	for (i = 0; i < req_len; i++) {
+		unsigned char c= *(http_req +i);
+		if((c>31)&&(c<127))
+			printf("%c",c);
+		else
+			printf(".");
+	}
+	printf("\n");
+#endif
+	*resp_len = snprintf((char*)http_resp, *resp_len, "HTTP/1.1 200 OK\r\n"
+		    "Server: dpdk-simple-web by james@ustc.edu.cn\r\n"
+		    "Content-Type: text/html; charset=iso-8859-1\r\n"
+		    "Cache-Control: no-cache, must-revalidate\r\n"
+		    "Pragma: no-cache\r\n"
+		    "Connection: close\r\n"
+		    "\r\n"
+		    "<html>OK</html>\n");
+	return 1;
+}
+
 #define DEBUGTCP
 
 int process_tcp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int iphdrlen, int len);
@@ -366,6 +395,7 @@ int process_tcp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int
 	int pkt_len;
 #ifdef DEBUGTCP
 	printf("TCP packet\n");
+	printf("TCP syn=%d ack=%d fin=%d\n",tcph->syn, tcph->ack, tcph->fin);
 #endif
 	if (tcph->syn && (!tcph->ack)) {	// SYN packet, send SYN+ACK
 #ifdef DEBUGTCP
@@ -381,7 +411,7 @@ int process_tcp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int
 		pkt_len = iph->ihl * 4 + tcph->doff * 4;
 		iph->tot_len = htons(pkt_len);
 		iph->check = 0;
-		rte_pktmbuf_pkt_len(mbuf) = pkt_len + 12;
+		rte_pktmbuf_data_len(mbuf) = pkt_len + 14;
 		set_tcp_checksum(iph);
 #ifdef DEBUGTCP
 		printf("I will reply following \n");
@@ -390,8 +420,8 @@ int process_tcp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int
 		int ret = rte_eth_tx_burst(0, 0, &mbuf, 1);
 		if(ret == 1)
 			return 1;
-#ifdef DEBUG
-		fprintf(stderr, "send tcp packet return %d\n", ret);
+#ifdef DEBUGTCP
+		printf("send tcp packet return %d\n", ret);
 #endif
 		return 0;
 	} else if (tcph->fin) {	// FIN packet, send ACK
@@ -408,7 +438,7 @@ int process_tcp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int
 		pkt_len = iph->ihl * 4 + tcph->doff * 4;
 		iph->tot_len = htons(pkt_len);
 		iph->check = 0;
-		rte_pktmbuf_pkt_len(mbuf) = pkt_len + 12;
+		rte_pktmbuf_data_len(mbuf) = pkt_len + 14;
 		set_tcp_checksum(iph);
 #ifdef DEBUGTCP
 		printf("I will reply following \n");
@@ -417,7 +447,60 @@ int process_tcp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int
 		int ret = rte_eth_tx_burst(0, 0, &mbuf, 1);
 		if(ret == 1)
 			return 1;
-#ifdef DEBUG
+#ifdef DEBUGTCP
+		fprintf(stderr, "send tcp packet return %d\n", ret);
+#endif
+		return 0;
+	}  else if (tcph->ack && (!tcph->syn)) {	// ACK packet, send DATA
+		pkt_len = ntohs(iph->tot_len);
+		int tcp_payload_len = pkt_len - iph->ihl * 4 - tcph->doff * 4;
+		int ntcp_payload_len = TCPMSS;
+		unsigned char *tcp_payload;
+		unsigned char buf[TCPMSS]; // http_respone
+
+#ifdef DEBUGTCP
+		printf("ACK pkt len=%d(inc ether) ip len=%d\n", len, pkt_len);
+		printf("tcp payload len=%d\n", tcp_payload_len);
+#endif
+		if (tcp_payload_len <= 5) {
+#ifdef DEBUGTCP
+			printf("tcp payload len=%d too small, ignore\n", tcp_payload_len);
+#endif
+			return 0;
+		}
+		tcp_payload = (unsigned char*)iph + iph->ihl * 4 + tcph->doff * 4;
+		if(process_http(tcp_payload, tcp_payload_len, buf, &ntcp_payload_len)==0)
+			return 0;
+#ifdef DEBUGTCP
+		printf("new payload len=%d :%s:\n",ntcp_payload_len, buf);
+#endif
+		uint32 ack_seq = htonl(ntohl(tcph->seq) + tcp_payload_len);
+		swap_bytes((unsigned char *)&eh->h_source, (unsigned char *)&eh->h_dest, 6);
+		swap_bytes((unsigned char *)&iph->saddr, (unsigned char *)&iph->daddr, 4);
+		swap_bytes((unsigned char *)&tcph->source, (unsigned char *)&tcph->dest, 2);
+		memcpy(tcp_payload, buf, ntcp_payload_len);
+		pkt_len = ntcp_payload_len + iph->ihl * 4 + tcph->doff * 4;
+		iph->tot_len = htons(pkt_len);
+#ifdef DEBUGTCP
+		fprintf(stderr, "new pkt len=%d\n", pkt_len);
+#endif
+		tcph->ack = 1;
+		tcph->psh = 1;
+		tcph->fin = 1;
+		tcph->seq = tcph->ack_seq;
+		tcph->ack_seq = ack_seq;
+		iph->check = 0;
+		rte_pktmbuf_data_len(mbuf) = pkt_len + 14;
+		len = pkt_len +14;
+		set_tcp_checksum(iph);
+#ifdef DEBUGTCP
+		printf("I will reply following \n");
+		dump_packet((unsigned char *)eh, len);
+#endif
+		int ret = rte_eth_tx_burst(0, 0, &mbuf, 1);
+		if(ret == 1)
+			return 1;
+#ifdef DEBUGTCP
 		fprintf(stderr, "send tcp packet return %d\n", ret);
 #endif
 		return 0;
@@ -462,7 +545,7 @@ lcore_main(void)
 			continue;
 		printf("got %d packets\n",nb_rx);
 		for(i=0;i<nb_rx;i++) {
-			int len = rte_pktmbuf_pkt_len(bufs[i]);
+			int len = rte_pktmbuf_data_len(bufs[i]);
 			dump_packet(rte_pktmbuf_mtod(bufs[i], unsigned char*), len);
 			struct ethhdr *eh = rte_pktmbuf_mtod(bufs[i], struct ethhdr*);
 			printf("eth pro=%4X\n",htons(eh->h_proto));
