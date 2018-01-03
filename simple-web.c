@@ -226,7 +226,7 @@ void dump_arp_packet(struct ethhdr *eh)
 		ah->arp_dpa[0], ah->arp_dpa[1], ah->arp_dpa[2], ah->arp_dpa[3]);
 }
 
-#define DEBUGARP
+// #define DEBUGARP
 
 int process_arp(struct rte_mbuf *mbuf, struct ethhdr *eh)
 {
@@ -263,25 +263,26 @@ unsigned short packet_chksum(unsigned short *addr,int len);
 int process_icmp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int iphdrlen, int len);
 
 unsigned short packet_chksum(unsigned short *addr,int len)
-{       int nleft=len;
-        int sum=0;
-        unsigned short *w=addr;
-        unsigned short answer=0;
-        while(nleft>1)
-        {       sum+=*w++;
-                nleft-=2;
+{
+	int nleft=len;
+	int sum=0;
+	unsigned short *w=addr;
+	unsigned short answer=0;
+	while(nleft>1) {
+		sum+=*w++;
+		nleft-=2;
+	}
+	if(nleft==1) {
+		*(unsigned char *)(&answer)=*(unsigned char *)w;
+		sum+=answer;
         }
-        if( nleft==1)
-        {       *(unsigned char *)(&answer)=*(unsigned char *)w;
-                sum+=answer;
-        }
-        sum=(sum>>16)+(sum&0xffff);
-        sum+=(sum>>16);
-        answer=~sum;
-        return answer;
+	sum=(sum>>16)+(sum&0xffff);
+	sum+=(sum>>16);
+	answer=~sum;
+	return answer;
 }
 
-#define DEBUGICMP
+// #define DEBUGICMP
 
 int process_icmp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int iphdrlen, int len)
 {
@@ -358,7 +359,7 @@ static void set_tcp_checksum(struct iphdr *ip)
 	ip->check = packet_chksum((unsigned short *) ip, ip->ihl<<2);
 }
 
-#define DEBUGHTTP
+//#define DEBUGHTTP
 int process_http(unsigned char *http_req, int req_len, unsigned char *http_resp, int *resp_len);
 int process_http(unsigned char *http_req, int req_len, unsigned char *http_resp, int *resp_len)
 {
@@ -385,7 +386,7 @@ int process_http(unsigned char *http_req, int req_len, unsigned char *http_resp,
 	return 1;
 }
 
-#define DEBUGTCP
+// #define DEBUGTCP
 
 int process_tcp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int iphdrlen, int len);
 
@@ -539,51 +540,45 @@ lcore_main(void)
 		int port = 0;
 		int i;
 		struct rte_mbuf *bufs[BURST_SIZE];
-		const uint16_t nb_rx = rte_eth_rx_burst(port, 0,
-			bufs, BURST_SIZE);
+		const uint16_t nb_rx = rte_eth_rx_burst(port, 0, bufs, BURST_SIZE);
 		if (unlikely(nb_rx == 0))
 			continue;
+#ifdef DEBUGPACKET
 		printf("got %d packets\n",nb_rx);
+#endif
 		for(i=0;i<nb_rx;i++) {
 			int len = rte_pktmbuf_data_len(bufs[i]);
-			dump_packet(rte_pktmbuf_mtod(bufs[i], unsigned char*), len);
 			struct ethhdr *eh = rte_pktmbuf_mtod(bufs[i], struct ethhdr*);
-			printf("eth pro=%4X\n",htons(eh->h_proto));
-			if(htons(eh->h_proto) == 0x806){  // ARP protocol
-				if(process_arp(bufs[i], eh))
-					continue;
-			} else if(htons(eh->h_proto)== 0x0800){  // IPv4 protocol
+#ifdef DEBUGPACKET
+			dump_packet((unsigned char*)eh, len);
+			printf("ethernet proto=%4X\n",htons(eh->h_proto));
+#endif
+			if(eh->h_proto==htons(0x0800)){  // IPv4 protocol
 				struct iphdr *iph;
 				iph = (struct iphdr*)((unsigned char*)(eh)+14);
 				int iphdrlen=iph->ihl<<2;
+#ifdef DEBUGPACKET
 				printf("ver=%d, frag_off=%d, daddr=%s pro=%d\n",iph->version,ntohs(iph->frag_off)&0x1FFF,
 						INET_NTOA(iph->daddr),iph->protocol);
-				if( (iph->version==4) && ((ntohs(iph->frag_off)&0x1FFF)==0) && (iph->daddr==my_ip)) {  // deal ipv4
+#endif
+				if((iph->version==4)&&((iph->frag_off&htons(0x1FFF))==0)&&(iph->daddr==my_ip)) {  // ipv4
+#ifdef DEBUGPACKET
 					printf("yes ipv4\n");
-					if(iph->protocol==1) { // ICMP
-						if(process_icmp(bufs[i], eh, iph, iphdrlen, len))
-							continue;
-					} else if(iph->protocol==6 ) { // TCP
+#endif
+					if(iph->protocol==6 ) { // TCP
 						if(process_tcp(bufs[i], eh, iph, iphdrlen, len))
+							continue;
+					} else if(iph->protocol==1) { // ICMP
+						if(process_icmp(bufs[i], eh, iph, iphdrlen, len))
 							continue;
 					}
 				}
+			} else if(eh->h_proto == htons(0x0806)){  // ARP protocol
+				if(process_arp(bufs[i], eh))
+					continue;
 			}
 			rte_pktmbuf_free(bufs[i]);
 		}
-
-#if 0
-		/* Send burst of TX packets, to second port of pair. */
-		const uint16_t nb_tx = rte_eth_tx_burst(port ^ 1, 0,
-			bufs, nb_rx);
-
-		/* Free any unsent packets. */
-		if (unlikely(nb_tx < nb_rx)) {
-			uint16_t buf;
-			for (buf = nb_tx; buf < nb_rx; buf++)
-				rte_pktmbuf_free(bufs[buf]);
-		}
-#endif
 	}
 }
 
