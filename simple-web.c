@@ -353,9 +353,9 @@ lcore_main(void)
 				struct iphdr *iph;
 				iph = (struct iphdr*)((unsigned char*)(eh)+14);
 				int iphdrlen=iph->ihl<<2;
-				printf("ver=%d, frag_off=%d, daddr=%s pro=%d\n",iph->version,iph->frag_off,
+				printf("ver=%d, frag_off=%d, daddr=%s pro=%d\n",iph->version,ntohs(iph->frag_off)&0x1FFF,
 						INET_NTOA(iph->daddr),iph->protocol);
-				if( (iph->version==4) && (iph->frag_off==0) && (iph->daddr==my_ip)) {  // deal ipv4
+				if( (iph->version==4) && ((ntohs(iph->frag_off)&0x1FFF)==0) && (iph->daddr==my_ip)) {  // deal ipv4
 					if(iph->protocol==1) { // ICMP
 						if(process_icmp(bufs[i], eh, iph, iphdrlen, len))
 							continue;
