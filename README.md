@@ -18,9 +18,6 @@ HTTP应答也最好不超过TCP MSS长度（也许将来可以实现IP包分片�
 * 可以收到包
 * 响应ARP
 * 响应ICMP echo
-
-待实现功能：
-
 * 响应TCP SYN
 * 响应HTTP GET
 
