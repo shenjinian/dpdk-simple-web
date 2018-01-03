@@ -16,36 +16,31 @@ HTTP应答也最好不超过TCP MSS长度（也许将来可以实现IP包分片�
 已实现功能：
 
 * 可以收到包
+* 响应ARP
+* 响应ICMP echo
 
 待实现功能：
 
-* 响应ARP
-* 响应ICMP echo
 * 响应TCP SYN
 * 响应HTTP GET
 
 我的环境：(Ubuntu 17.10)
 
 ```
-apt-get install libnuma-dev libcap-dev git make
+apt-get install libnuma-dev libcap-dev git make gcc 
 cd /usr/src
 wget https://fast.dpdk.org/rel/dpdk-17.11.tar.xz
 xzcat dpdk-17.11.tar.xz | tar xvf -
 cd dpdk-17.11
 make config T=x86_64-native-linuxapp-gcc
-sed -ri 's,(PMD_PCAP=).*,\1y,' build/.config
 make
-make -C examples RTE_SDK=$(pwd) RTE_TARGET=build O=$(pwd)/build/examples
 
-mkdir -p /mnt/huge
-mount -t hugetlbfs nodev /mnt/huge
-echo 64 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
+usertools/dpdk-setup.py
 
-ip link set enp0s8 up    #enp0s8是一个独立的虚拟网卡，专用于DPDK
 
 cd /usr/src/
 git clone https://github.com/bg6cq/dpdk-simple-web.git
 cd dpdk-simple-web
-make
+make RTE_SDK=/usr/src/dpdk-17.11 O=.
 sh run.sh
 ```

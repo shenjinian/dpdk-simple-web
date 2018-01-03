@@ -44,6 +44,8 @@
 #include <linux/if_packet.h>
 #include <linux/if_ether.h>
 #include <linux/if_arp.h>
+#include <linux/ip.h>
+#include <linux/icmp.h>
 #include <arpa/inet.h>
 
 #define RX_RING_SIZE 128
@@ -256,6 +258,27 @@ void process_arp(struct rte_mbuf *mbuf)
 	rte_pktmbuf_free(mbuf);
 }
 
+unsigned short icmp_chksum(unsigned short *addr,int len);
+
+unsigned short icmp_chksum(unsigned short *addr,int len)
+{       int nleft=len;
+        int sum=0;
+        unsigned short *w=addr;
+        unsigned short answer=0;
+        while(nleft>1)
+        {       sum+=*w++;
+                nleft-=2;
+        }
+        if( nleft==1)
+        {       *(unsigned char *)(&answer)=*(unsigned char *)w;
+                sum+=answer;
+        }
+        sum=(sum>>16)+(sum&0xffff);
+        sum+=(sum>>16);
+        answer=~sum;
+        return answer;
+}
+
 /*
  * The lcore main. This is the main thread that does the work, reading from
  * an input port and writing to an output port.
@@ -293,12 +316,40 @@ lcore_main(void)
 			continue;
 		printf("got %d packets\n",nb_rx);
 		for(i=0;i<nb_rx;i++) {
-			dump_packet(rte_pktmbuf_mtod(bufs[i], unsigned char*), rte_pktmbuf_pkt_len(bufs[i]));
+			int len = rte_pktmbuf_pkt_len(bufs[i]);
+			dump_packet(rte_pktmbuf_mtod(bufs[i], unsigned char*), len);
 			struct ethhdr *eh = rte_pktmbuf_mtod(bufs[i], struct ethhdr*);
+			printf("eth pro=%4X\n",htons(eh->h_proto));
 			if(htons(eh->h_proto)== 0x806){  // ARP protocol
 				process_arp(bufs[i]);
-			} else
-				rte_pktmbuf_free(bufs[i]);
+			} else if(htons(eh->h_proto)== 0x0800){  // IPv4 protocol
+				struct iphdr *iph;
+				iph = (struct iphdr*)((unsigned char*)(eh)+14);
+				int iphdrlen=iph->ihl<<2;
+				printf("ver=%d, frag_off=%d, daddr=%s pro=%d\n",iph->version,iph->frag_off,
+						INET_NTOA(iph->daddr),iph->protocol);
+				if( (iph->version==4) && (iph->frag_off==0) && (iph->daddr==my_ip)) {  // deal ipv4
+					if(iph->protocol==1) {  // ICMP
+						struct icmphdr *icmph = (struct icmphdr *)((unsigned char*)(iph)+iphdrlen);
+						printf("icmp type=%d, code=%d\n",icmph->type,icmph->code);
+						if((icmph->type==8) && (icmph->code==0)) {  // ICMP echo req
+							memcpy((unsigned char*)eh->h_dest, (unsigned char*)eh->h_source, 6);
+							memcpy((unsigned char*)eh->h_source, (unsigned char*)&my_eth_addr, 6);
+							memcpy((unsigned char*)&iph->daddr, (unsigned char*)&iph->saddr, 4);
+							memcpy((unsigned char*)&iph->saddr, (unsigned char*)&my_ip, 4);
+							icmph->type=0;
+							icmph->checksum=0;
+							icmph->checksum = icmp_chksum((unsigned short*)icmph, len - 14 - iphdrlen );
+							printf("I want reply\n");
+							dump_packet(rte_pktmbuf_mtod(bufs[i], unsigned char*), len);
+							int ret	= rte_eth_tx_burst(0, 0, &bufs[i], 1);
+							if(ret==1) continue;
+							printf("ret = %d\n",ret);
+						}
+					}
+				}
+			}
+			rte_pktmbuf_free(bufs[i]);
 		}
 
 #if 0
