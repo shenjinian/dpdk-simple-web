@@ -84,7 +84,7 @@ char * INET_NTOA(uint32 ip);
 void swap_bytes(unsigned char *a, unsigned char *b, int len);
 void dump_packet(unsigned char *buf, int len);
 void dump_arp_packet(struct ethhdr *eh);
-void process_arp(struct rte_mbuf *mbuf);
+int process_arp(struct rte_mbuf *mbuf, struct ethhdr *eh);
 
 char * INET_NTOA(uint32 ip)	// ip is network order
 {
@@ -225,17 +225,15 @@ void dump_arp_packet(struct ethhdr *eh)
 
 #define DEBUGARP
 
-void process_arp(struct rte_mbuf *mbuf)
+int process_arp(struct rte_mbuf *mbuf, struct ethhdr *eh)
 {
-	struct ethhdr *eh = rte_pktmbuf_mtod(mbuf, struct ethhdr*);
 	struct arp_header *ah;
 	ah = (struct arp_header*) ((unsigned char *)eh + 14);
 #ifdef DEBUGARP
 	dump_arp_packet(eh);
 #endif
 	if(htons(ah->arp_op) != 0x0001) { // ARP request
-		rte_pktmbuf_free(mbuf);
-		return;
+		return 0;
 	}
 	if(memcmp((unsigned char*)&my_ip, (unsigned char*)ah->arp_dpa, 4)==0) {
 #ifdef DEBUGARP
@@ -253,12 +251,13 @@ void process_arp(struct rte_mbuf *mbuf)
 		dump_arp_packet(eh);
 #endif
 		if(likely(1 == rte_eth_tx_burst(0, 0, &mbuf, 1)))
-			return;
+			return 1;
 	}
-	rte_pktmbuf_free(mbuf);
+	return 0;
 }
 
 unsigned short icmp_chksum(unsigned short *addr,int len);
+int process_icmp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int iphdrlen, int len);
 
 unsigned short icmp_chksum(unsigned short *addr,int len)
 {       int nleft=len;
@@ -277,6 +276,33 @@ unsigned short icmp_chksum(unsigned short *addr,int len)
         sum+=(sum>>16);
         answer=~sum;
         return answer;
+}
+
+#define DEBUGICMP
+
+int process_icmp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int iphdrlen, int len)
+{
+	struct icmphdr *icmph = (struct icmphdr *)((unsigned char*)(iph)+iphdrlen);
+#ifdef DEBUGICMP
+	printf("icmp type=%d, code=%d\n",icmph->type,icmph->code);
+#endif
+	if((icmph->type==8) && (icmph->code==0)) {  // ICMP echo req
+		memcpy((unsigned char*)eh->h_dest, (unsigned char*)eh->h_source, 6);
+		memcpy((unsigned char*)eh->h_source, (unsigned char*)&my_eth_addr, 6);
+		memcpy((unsigned char*)&iph->daddr, (unsigned char*)&iph->saddr, 4);
+		memcpy((unsigned char*)&iph->saddr, (unsigned char*)&my_ip, 4);
+		icmph->type=0;
+		icmph->checksum=0;
+		icmph->checksum = icmp_chksum((unsigned short*)icmph, len - 14 - iphdrlen );
+#ifdef DEBUGICMP
+		printf("I will send reply\n");
+		dump_packet(rte_pktmbuf_mtod(mbuf, unsigned char*), len);
+#endif
+		int ret	= rte_eth_tx_burst(0, 0, &mbuf, 1);
+		if(ret==1) return 1;
+		printf("send icmp packet ret = %d\n",ret);
+	}
+	return 0;
 }
 
 /*
@@ -320,8 +346,9 @@ lcore_main(void)
 			dump_packet(rte_pktmbuf_mtod(bufs[i], unsigned char*), len);
 			struct ethhdr *eh = rte_pktmbuf_mtod(bufs[i], struct ethhdr*);
 			printf("eth pro=%4X\n",htons(eh->h_proto));
-			if(htons(eh->h_proto)== 0x806){  // ARP protocol
-				process_arp(bufs[i]);
+			if(htons(eh->h_proto) == 0x806){  // ARP protocol
+				if(process_arp(bufs[i], eh))
+					continue;
 			} else if(htons(eh->h_proto)== 0x0800){  // IPv4 protocol
 				struct iphdr *iph;
 				iph = (struct iphdr*)((unsigned char*)(eh)+14);
@@ -329,23 +356,9 @@ lcore_main(void)
 				printf("ver=%d, frag_off=%d, daddr=%s pro=%d\n",iph->version,iph->frag_off,
 						INET_NTOA(iph->daddr),iph->protocol);
 				if( (iph->version==4) && (iph->frag_off==0) && (iph->daddr==my_ip)) {  // deal ipv4
-					if(iph->protocol==1) {  // ICMP
-						struct icmphdr *icmph = (struct icmphdr *)((unsigned char*)(iph)+iphdrlen);
-						printf("icmp type=%d, code=%d\n",icmph->type,icmph->code);
-						if((icmph->type==8) && (icmph->code==0)) {  // ICMP echo req
-							memcpy((unsigned char*)eh->h_dest, (unsigned char*)eh->h_source, 6);
-							memcpy((unsigned char*)eh->h_source, (unsigned char*)&my_eth_addr, 6);
-							memcpy((unsigned char*)&iph->daddr, (unsigned char*)&iph->saddr, 4);
-							memcpy((unsigned char*)&iph->saddr, (unsigned char*)&my_ip, 4);
-							icmph->type=0;
-							icmph->checksum=0;
-							icmph->checksum = icmp_chksum((unsigned short*)icmph, len - 14 - iphdrlen );
-							printf("I want reply\n");
-							dump_packet(rte_pktmbuf_mtod(bufs[i], unsigned char*), len);
-							int ret	= rte_eth_tx_burst(0, 0, &bufs[i], 1);
-							if(ret==1) continue;
-							printf("ret = %d\n",ret);
-						}
+					if(iph->protocol==1) { // ICMP
+						if(process_icmp(bufs[i], eh, iph, iphdrlen, len))
+							continue;
 					}
 				}
 			}
