@@ -31,7 +31,9 @@
  *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-/* simple-web.c: Simple WEB Server using DPDK. */
+/* simple-web.c: Simple WEB Server using DPDK. 
+   james@ustc.edu.cn 2018.01.03
+*/
 
 #include <stdint.h>
 #include <inttypes.h>
@@ -56,7 +58,7 @@
 #define MBUF_CACHE_SIZE 250
 #define BURST_SIZE 32
 
-#define TCPMSS 1200
+#define TCPMSS 1400
 
 static const struct rte_eth_conf port_conf_default = {
 	.rxmode = { .max_rx_pkt_len = ETHER_MAX_LEN }
@@ -467,7 +469,7 @@ int process_tcp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int
 		int tcp_payload_len = pkt_len - iph->ihl * 4 - tcph->doff * 4;
 		int ntcp_payload_len = TCPMSS;
 		unsigned char *tcp_payload;
-		unsigned char buf[TCPMSS*2]; // http_respone
+		unsigned char buf[TCPMSS]; // http_respone
 
 #ifdef DEBUGTCP
 		printf("ACK pkt len=%d(inc ether) ip len=%d\n", rte_pktmbuf_data_len(mbuf), pkt_len);
