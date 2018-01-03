@@ -46,6 +46,7 @@
 #include <linux/if_arp.h>
 #include <linux/ip.h>
 #include <linux/icmp.h>
+#include <linux/tcp.h>
 #include <arpa/inet.h>
 
 #define RX_RING_SIZE 128
@@ -256,10 +257,10 @@ int process_arp(struct rte_mbuf *mbuf, struct ethhdr *eh)
 	return 0;
 }
 
-unsigned short icmp_chksum(unsigned short *addr,int len);
+unsigned short packet_chksum(unsigned short *addr,int len);
 int process_icmp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int iphdrlen, int len);
 
-unsigned short icmp_chksum(unsigned short *addr,int len)
+unsigned short packet_chksum(unsigned short *addr,int len)
 {       int nleft=len;
         int sum=0;
         unsigned short *w=addr;
@@ -293,7 +294,7 @@ int process_icmp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, in
 		memcpy((unsigned char*)&iph->saddr, (unsigned char*)&my_ip, 4);
 		icmph->type=0;
 		icmph->checksum=0;
-		icmph->checksum = icmp_chksum((unsigned short*)icmph, len - 14 - iphdrlen );
+		icmph->checksum = packet_chksum((unsigned short*)icmph, len - 14 - iphdrlen );
 #ifdef DEBUGICMP
 		printf("I will send reply\n");
 		dump_packet(rte_pktmbuf_mtod(mbuf, unsigned char*), len);
@@ -301,6 +302,125 @@ int process_icmp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, in
 		int ret	= rte_eth_tx_burst(0, 0, &mbuf, 1);
 		if(ret==1) return 1;
 		printf("send icmp packet ret = %d\n",ret);
+	}
+	return 0;
+}
+
+u_int16_t tcp_sum_calc(u_int16_t len_tcp, u_int16_t src_addr[], u_int16_t dest_addr[], u_int16_t buff[]);
+
+// function from http://www.bloof.de/tcp_checksumming, thanks to crunsh
+u_int16_t tcp_sum_calc(u_int16_t len_tcp, u_int16_t src_addr[], u_int16_t dest_addr[], u_int16_t buff[])
+{
+	u_int16_t prot_tcp = 6;
+	u_int32_t sum = 0;
+	int nleft = len_tcp;
+	u_int16_t *w = buff;
+
+	/* calculate the checksum for the tcp header and payload */
+	while (nleft > 1) {
+		sum += *w++;
+		nleft -= 2;
+	}
+
+	/* if nleft is 1 there ist still on byte left. We add a padding byte (0xFF) to build a 16bit word */
+	if (nleft > 0)
+		sum += *w & ntohs(0xFF00);	/* Thanks to Dalton */
+
+	/* add the pseudo header */
+	sum += src_addr[0];
+	sum += src_addr[1];
+	sum += dest_addr[0];
+	sum += dest_addr[1];
+	sum += htons(len_tcp);
+	sum += htons(prot_tcp);
+
+	// keep only the last 16 bits of the 32 bit calculated sum and add the carries
+	sum = (sum >> 16) + (sum & 0xFFFF);
+	sum += (sum >> 16);
+
+	// Take the one's complement of sum
+	sum = ~sum;
+
+	return ((u_int16_t) sum);
+}
+
+static void set_tcp_checksum(struct iphdr *ip);
+
+static void set_tcp_checksum(struct iphdr *ip)
+{
+	struct tcphdr *tcph = (struct tcphdr *)((u_int8_t *) ip + (ip->ihl << 2));
+	tcph->check = 0;	/* Checksum field has to be set to 0 before checksumming */
+	tcph->check = (u_int16_t) tcp_sum_calc((u_int16_t) (ntohs(ip->tot_len) - ip->ihl * 4),
+		       (u_int16_t *) & ip->saddr, (u_int16_t *) & ip->daddr, (u_int16_t *) tcph);
+	ip->check=0;
+	ip->check = packet_chksum((unsigned short *) ip, ip->ihl<<2);
+}
+
+#define DEBUGTCP
+
+int process_tcp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int iphdrlen, int len);
+
+int process_tcp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int iphdrlen, int len)
+{
+	struct tcphdr *tcph = (struct tcphdr *)((unsigned char*)(iph)+iphdrlen);
+	int pkt_len;
+#ifdef DEBUGTCP
+	printf("TCP packet\n");
+#endif
+	if (tcph->syn && (!tcph->ack)) {	// SYN packet, send SYN+ACK
+#ifdef DEBUGTCP
+		printf("SYN packet\n");
+#endif
+		swap_bytes((unsigned char *)&eh->h_source, (unsigned char *)&eh->h_dest, 6);
+		swap_bytes((unsigned char *)&iph->saddr, (unsigned char *)&iph->daddr, 4);
+		swap_bytes((unsigned char *)&tcph->source, (unsigned char *)&tcph->dest, 2);
+		tcph->ack = 1;
+		tcph->ack_seq = htonl(ntohl(tcph->seq) + 1);
+		tcph->seq = htonl(1);
+		tcph->doff = 20 / 4;
+		pkt_len = iph->ihl * 4 + tcph->doff * 4;
+		iph->tot_len = htons(pkt_len);
+		iph->check = 0;
+		rte_pktmbuf_pkt_len(mbuf) = pkt_len + 12;
+		set_tcp_checksum(iph);
+#ifdef DEBUGTCP
+		printf("I will reply following \n");
+		dump_packet((unsigned char *)eh, len);
+#endif
+		int ret = rte_eth_tx_burst(0, 0, &mbuf, 1);
+		if(ret == 1)
+			return 1;
+#ifdef DEBUG
+		fprintf(stderr, "send tcp packet return %d\n", ret);
+#endif
+		return 0;
+	} else if (tcph->fin) {	// FIN packet, send ACK
+#ifdef DEBUGTCP
+		fprintf(stderr, "FIN packet\n");
+#endif
+		swap_bytes((unsigned char *)&eh->h_source, (unsigned char *)&eh->h_dest, 6);
+		swap_bytes((unsigned char *)&iph->saddr, (unsigned char *)&iph->daddr, 4);
+		swap_bytes((unsigned char *)&tcph->source, (unsigned char *)&tcph->dest, 2);
+		swap_bytes((unsigned char *)&tcph->seq, (unsigned char *)&tcph->ack_seq, 4);
+		tcph->ack = 1;
+		tcph->ack_seq = htonl(ntohl(tcph->ack_seq) + 1);
+		tcph->doff = 20 / 4;
+		pkt_len = iph->ihl * 4 + tcph->doff * 4;
+		iph->tot_len = htons(pkt_len);
+		iph->check = 0;
+		rte_pktmbuf_pkt_len(mbuf) = pkt_len + 12;
+		set_tcp_checksum(iph);
+#ifdef DEBUGTCP
+		printf("I will reply following \n");
+		dump_packet((unsigned char *)eh, len);
+#endif
+		int ret = rte_eth_tx_burst(0, 0, &mbuf, 1);
+		if(ret == 1)
+			return 1;
+#ifdef DEBUG
+		fprintf(stderr, "send tcp packet return %d\n", ret);
+#endif
+		return 0;
 	}
 	return 0;
 }
@@ -356,8 +476,12 @@ lcore_main(void)
 				printf("ver=%d, frag_off=%d, daddr=%s pro=%d\n",iph->version,ntohs(iph->frag_off)&0x1FFF,
 						INET_NTOA(iph->daddr),iph->protocol);
 				if( (iph->version==4) && ((ntohs(iph->frag_off)&0x1FFF)==0) && (iph->daddr==my_ip)) {  // deal ipv4
+					printf("yes ipv4\n");
 					if(iph->protocol==1) { // ICMP
 						if(process_icmp(bufs[i], eh, iph, iphdrlen, len))
+							continue;
+					} else if(iph->protocol==6 ) { // TCP
+						if(process_tcp(bufs[i], eh, iph, iphdrlen, len))
 							continue;
 					}
 				}
