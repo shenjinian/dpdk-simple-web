@@ -39,10 +39,10 @@ RTE_TARGET ?= x86_64-native-linuxapp-gcc
 include $(RTE_SDK)/mk/rte.vars.mk
 
 # binary name
-APP = simple-web
+APP = printreq
 
 # all source are stored in SRCS-y
-SRCS-y := simple-web.c
+SRCS-y := printreq.c
 
 CFLAGS += $(WERROR_FLAGS)
 

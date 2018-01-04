@@ -85,6 +85,8 @@ uint32 my_ip;  			// My IP Address in network order
 uint16 tcp_port; 		// listen tcp port in network order
 
 
+int user_init_func(int , char *[]);
+
 char * INET_NTOA(uint32 ip);
 void swap_bytes(unsigned char *a, unsigned char *b, int len);
 void dump_packet(unsigned char *buf, int len);
@@ -361,42 +363,7 @@ static void set_tcp_checksum(struct iphdr *ip)
 	ip->check = packet_chksum((unsigned short *) ip, ip->ihl<<2);
 }
 
-// #define DEBUGHTTP
-int process_http(unsigned char *http_req, int req_len, unsigned char *http_resp, int *resp_len);
-int process_http(unsigned char *http_req __attribute__((unused)), int req_len __attribute__((unused)), unsigned char *http_resp, int *resp_len)
-{
-#ifdef DEBUGHTTP
-	printf("http req payload is: ");
-	int i;
-	for (i = 0; i < req_len; i++) {
-		unsigned char c= *(http_req +i);
-		if((c>31)&&(c<127))
-			printf("%c",c);
-		else
-			printf(".");
-	}
-	printf("\n");
-	printf("max-http-repsone len: %d\n",*resp_len);
-#endif
-	int t = snprintf((char*)http_resp, *resp_len, "%s",
-			"HTTP/1.1 200 OK\r\n"
-		    "Server: dpdk-simple-web by james@ustc.edu.cn\r\n"
-		    "Content-Type: text/html; charset=iso-8859-1\r\n"
-		    "Cache-Control: no-cache, must-revalidate\r\n"
-		    "Pragma: no-cache\r\n"
-		    "Connection: close\r\n"
-		    "\r\n<html>"
-		    "<html>ABCDESDJSLDSLDKSDLKSJLDKSLDKLSDKSLDJSLKDLSJDLSKDJLSJDLSKDLSKDLSJDLSJDLKSDLSLDSJLDKJSLDKJSLDKLSJDLSJDLSJDLSJDLSKJDLSJDLSJDLSJDLSJDLSJDLSJLDJSLDJLSJDLSJDLSJDLSJDLSJDLSDJSLDJLSDJSLDLSDJLSJDLSDJLSJDLSJDLSDJLSDJLSDJSLJDLSJDLSDLSJDLSJDLSDJLSDJLSDJLDJSLDSLDSLDJLSDSJDLSKJDLSDLSDJLSKJDKLSKDLSDJLSDJLSDLSDJLSDLSJDLSJDLSDJLSDJSLDJSDLSJDLSDLSDJLSDJLSDJLSDLSDSJDLJSDLSDKOK"
-"sadkjsaldfkjasldfkasldfjlasdjflasjdflasjdflajsldfasldfjlas"
-		    "<html>ABCDESDJSLDSLDKSDLKSJLDKSLDKLSDKSLDJSLKDLSJDLSKDJLSJDLSKDLSKDLSJDLSJDLKSDLSLDSJLDKJSLDKJSLDKLSJDLSJDLSJDLSJDLSKJDLSJDLSJDLSJDLSJDLSJDLSJLDJSLDJLSJDLSJDLSJDLSJDLSJDLSDJSLDJLSDJSLDLSDJLSJDLSDJLSJDLSJDLSDJLSDJLSDJSLJDLSJDLSDLSJDLSJDLSDJLSDJLSDJLDJSLDSLDSLDJLSDSJDLSKJDLSDLSDJLSKJDKLSKDLSDJLSDJLSDLSDJLSDLSJDLSJDLSDJLSDJSLDJSDLSJDLSDLSDJLSDJLSDJLSDLSDSJDLJSDLSDKOK"
-		    "ABCDESDJSLDSLDKSDLKSJLDKSLDKLSDKSLDJSLDLSJDLSJDLSJDLSJLDJSLDJLSJDLSJDLSJDLSJDLSJDLSDJSLDJLSDJSLDLSDJLSJDLSDJLSJDLSJDLSDJLSDJLSDJSLJDLSJDLSDLSJDLSJDLSDJLSDJLSDJLDJSLDSLDSLDJLSDSJDLSKJDLSDLSDJLSKJDKLSKDLSDJLSDJLSDLSDJLSDLSJDLSLJSDLSDKOK</html>\n");
-	if(t<*resp_len)
-		*resp_len = t;
-#ifdef DEBUGHTTP
-	printf("resp_len %d\n",*resp_len);
-#endif
-	return 1;
-}
+int process_http(unsigned char *http_req, int req_len, unsigned char *http_resp, int *resp_len, int *resp_in_req);
 
 // #define DEBUGTCP
 
@@ -407,9 +374,12 @@ int process_tcp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int
 	struct tcphdr *tcph = (struct tcphdr *)((unsigned char*)(iph)+iphdrlen);
 	int pkt_len;
 #ifdef DEBUGTCP
-	printf("TCP packet\n");
+	printf("TCP packet, dport=%d\n",ntohs(tcph->dest));
 	printf("TCP syn=%d ack=%d fin=%d\n",tcph->syn, tcph->ack, tcph->fin);
 #endif
+	if (tcph->dest != tcp_port) 
+		return 0;
+
 	if (tcph->syn && (!tcph->ack)) {	// SYN packet, send SYN+ACK
 #ifdef DEBUGTCP
 		printf("SYN packet\n");
@@ -470,6 +440,7 @@ int process_tcp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int
 		int ntcp_payload_len = TCPMSS;
 		unsigned char *tcp_payload;
 		unsigned char buf[TCPMSS]; // http_respone
+		int resp_in_req=0;
 
 #ifdef DEBUGTCP
 		printf("ACK pkt len=%d(inc ether) ip len=%d\n", rte_pktmbuf_data_len(mbuf), pkt_len);
@@ -482,7 +453,7 @@ int process_tcp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int
 			return 0;
 		}
 		tcp_payload = (unsigned char*)iph + iph->ihl * 4 + tcph->doff * 4;
-		if(process_http(tcp_payload, tcp_payload_len, buf, &ntcp_payload_len)==0)
+		if(process_http(tcp_payload, tcp_payload_len, buf, &ntcp_payload_len, &resp_in_req)==0)
 			return 0;
 #ifdef DEBUGTCP
 		printf("new payload len=%d :%s:\n",ntcp_payload_len, buf);
@@ -491,7 +462,8 @@ int process_tcp(struct rte_mbuf *mbuf, struct ethhdr *eh, struct iphdr *iph, int
 		swap_bytes((unsigned char *)&eh->h_source, (unsigned char *)&eh->h_dest, 6);
 		swap_bytes((unsigned char *)&iph->saddr, (unsigned char *)&iph->daddr, 4);
 		swap_bytes((unsigned char *)&tcph->source, (unsigned char *)&tcph->dest, 2);
-		memcpy(tcp_payload, buf, ntcp_payload_len);
+		if(!resp_in_req)
+			memcpy(tcp_payload, buf, ntcp_payload_len);
 		pkt_len = ntcp_payload_len + iph->ihl * 4 + tcph->doff * 4;
 		iph->tot_len = htons(pkt_len);
 #ifdef DEBUGTCP
@@ -611,7 +583,7 @@ main(int argc, char *argv[])
 	argc -= ret;
 	argv += ret;
 
-	if(argc!=3)
+	if(argc<3)
 		rte_exit(EXIT_FAILURE, "You need tell me my IP and port\n");
 
 	my_ip = inet_addr(argv[1]);
@@ -619,6 +591,11 @@ main(int argc, char *argv[])
 	tcp_port = htons(atoi(argv[2]));
 
 	printf("My IP is: %s, port is %d\n", INET_NTOA(my_ip), ntohs(tcp_port));
+
+	argc-=2;
+	argv+=2;
+
+	user_init_func(argc, argv);
 
 	/* Check that there is an even number of ports to send/receive on. */
 	nb_ports = rte_eth_dev_count();
