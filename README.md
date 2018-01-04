@@ -67,5 +67,67 @@ make
 #测试运行, 其中192.168.1.2是网卡的IP地址
 build/printreq -c1 -n1 -- 192.168.1.2 80
 
-#从其他机器访问 http://192.168.1.2 能看到显示HTTP请求的信息
+```
+
+从其他机器访问 http://192.168.1.2 能看到显示HTTP请求的信息
+
+下面是从其他机器进行的测试：
+
+```
+ab -n 100000 -c 1000 http://222.195.81.233/
+This is ApacheBench, Version 2.3 <$Revision: 1796539 $>
+Copyright 1996 Adam Twiss, Zeus Technology Ltd, http://www.zeustech.net/
+Licensed to The Apache Software Foundation, http://www.apache.org/
+
+Benchmarking 222.195.81.233 (be patient)
+Completed 10000 requests
+Completed 20000 requests
+Completed 30000 requests
+Completed 40000 requests
+Completed 50000 requests
+Completed 60000 requests
+Completed 70000 requests
+Completed 80000 requests
+Completed 90000 requests
+Completed 100000 requests
+Finished 100000 requests
+
+
+Server Software:        dpdk-simple-web-server
+Server Hostname:        222.195.81.233
+Server Port:            80
+
+Document Path:          /
+Document Length:        123 bytes
+
+Concurrency Level:      1000
+Time taken for tests:   0.975 seconds
+Complete requests:      100000
+Failed requests:        0
+Total transferred:      31900000 bytes
+HTML transferred:       12300000 bytes
+Requests per second:    102565.26 [#/sec] (mean)
+Time per request:       9.750 [ms] (mean)
+Time per request:       0.010 [ms] (mean, across all concurrent requests)
+Transfer rate:          31951.48 [Kbytes/sec] received
+
+Connection Times (ms)
+              min  mean[+/-sd] median   max
+Connect:        2    4   0.5      4       7
+Processing:     3    5   0.8      5       9
+Waiting:        2    4   0.7      4       8
+Total:          7   10   0.7      9      13
+WARNING: The median and mean for the total time are not within a normal deviation
+        These results are probably not that reliable.
+
+Percentage of the requests served within a certain time (ms)
+  50%      9
+  66%     10
+  75%     10
+  80%     10
+  90%     11
+  95%     11
+  98%     11
+  99%     12
+ 100%     13 (longest request)
 ```
