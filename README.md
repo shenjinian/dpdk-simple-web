@@ -14,8 +14,6 @@
 HTTP应答也最好不超过TCP MSS长度（也许将来可以实现IP包分片功能）。
 
 已实现功能：
-
-* 可以收到包
 * 响应ARP
 * 响应ICMP echo
 * 响应TCP SYN
@@ -24,20 +22,31 @@ HTTP应答也最好不超过TCP MSS长度（也许将来可以实现IP包分片�
 我的环境：(Ubuntu 17.10)
 
 ```
-apt-get install libnuma-dev libcap-dev git make gcc 
+安装Ubuntu artful(17.10)
+
+apt-get install gcc git make libnuma-dev
+
+ln -s /usr/bin/python3 /usr/bin/python
+
 cd /usr/src
 wget https://fast.dpdk.org/rel/dpdk-17.11.tar.xz
 xzcat dpdk-17.11.tar.xz | tar xvf -
-cd dpdk-17.11
-make config T=x86_64-native-linuxapp-gcc
-make
 
+cd dpdk-17.11
 usertools/dpdk-setup.py
 
+select 14 编译
+select 17 加载模块
+select 21 输入64
+select 22 查看网卡
+select 23 输入空余的网卡名字，绑定网卡
 
 cd /usr/src/
 git clone https://github.com/bg6cq/dpdk-simple-web.git
 cd dpdk-simple-web
-make RTE_SDK=/usr/src/dpdk-17.11 O=.
-sh run.sh
+source env_vars
+
+make
+
+sh run
 ```
